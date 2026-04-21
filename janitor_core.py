@@ -182,6 +182,11 @@ class SecurityJanitor:
 
     def _execute_cycle(self):
         """Execute one full audit-patch-commit cycle."""
+        print(f"DEBUG: Scanning {self.config.target_path}")
+        findings = self.auditor.scan_directory(self.config.target_path)
+        print(f"DEBUG: Found {len(findings)} findings")
+        for f in findings:
+            print(f"DEBUG: Finding {f.rule_id} at {f.file_path}")
         self._run_count += 1
         cycle_id = hashlib.md5(
             f"{time.time()}-{self._run_count}".encode()
