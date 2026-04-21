@@ -187,7 +187,7 @@ RULES: list[Rule] = [
         severity=Severity.HIGH,
         description="Potential LLM Prompt Injection pattern detected",
         pattern=re.compile(
-            r'''(?:ignore\s+all\s+previous\s+instructions|disregard\s+the\s+above|system\s+override|you\s+are\s+now\s+a)''',
+            r'''(?:ignore\s+(?:all\s+)?previous\s+instructions|disregard\s+the\s+above|system\s+override|you\s+are\s+now\s+a)''',
             re.IGNORECASE,
         ),
         file_extensions=[".py", ".js", ".ts", ".md", ".txt"],
