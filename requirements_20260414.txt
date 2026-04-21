@@ -1,0 +1,7 @@
+# [TRISHULA SEPTIP-v2 RATIFIED]
+# [ANCHOR: 2026-04-14T05:43:16.928263+00:00]
+# [BLOCK C/D RE-ANCHOR]
+
+gitpython>=3.1.0
+docker>=7.0.0
+watchdog>=4.0.0
