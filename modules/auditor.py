@@ -73,16 +73,16 @@ RULES: list[Rule] = [
         description="Hardcoded API key or secret detected",
         pattern=re.compile(
             r'''(?:api[_-]?key|api[_-]?secret|secret[_-]?key|access[_-]?token|auth[_-]?token)'''
-            r'''\s*[=:]\s*["\'][A-Za-z0-9+/=_\-]{16,}["\']''',
+            r'''s*[=:]s*["'][A-Za-z0-9+/=_-]{16,}["']''',
             re.IGNORECASE,
         ),
         file_extensions=[".py", ".js", ".ts", ".yaml", ".yml", ".json", ".env", ".cfg", ".ini", ".toml"],
         fixable=True,
         fix_hint="Replace hardcoded secret with environment variable reference",
         suppress_patterns=[
-            re.compile(r"os\.environ", re.IGNORECASE),
-            re.compile(r"process\.env", re.IGNORECASE),
-            re.compile(r"#\s*noqa", re.IGNORECASE),
+            re.compile(r"os.environ", re.IGNORECASE),
+            re.compile(r"process.env", re.IGNORECASE),
+            re.compile(r"#s*noqa", re.IGNORECASE),
             re.compile(r"example|placeholder|changeme|xxx|your[_-]", re.IGNORECASE),
         ],
     ),
@@ -91,16 +91,16 @@ RULES: list[Rule] = [
         severity=Severity.CRITICAL,
         description="Hardcoded password detected",
         pattern=re.compile(
-            r'''(?:password|passwd|pwd)\s*[=:]\s*["\'][^"\']{4,}["\']''',
+            r'''(?:password|passwd|pwd)s*[=:]s*["'][^"']{4,}["']''',
             re.IGNORECASE,
         ),
         file_extensions=[".py", ".js", ".ts", ".yaml", ".yml", ".json", ".cfg", ".ini", ".toml"],
         fixable=True,
         fix_hint="Replace hardcoded password with environment variable reference",
         suppress_patterns=[
-            re.compile(r"os\.environ|getenv|process\.env", re.IGNORECASE),
-            re.compile(r"#\s*noqa|example|placeholder|changeme|xxx", re.IGNORECASE),
-            re.compile(r"password\s*[=:]\s*[\"'][\s]*[\"']", re.IGNORECASE),  # empty password
+            re.compile(r"os.environ|getenv|process.env", re.IGNORECASE),
+            re.compile(r"#s*noqa|example|placeholder|changeme|xxx", re.IGNORECASE),
+            re.compile(r"passwords*[=:]s*["'][s]*["']", re.IGNORECASE),  # empty password
         ],
     ),
     Rule(
@@ -118,7 +118,7 @@ RULES: list[Rule] = [
         severity=Severity.HIGH,
         description="Mutable GitHub Action tag reference (vulnerable to tag-poisoning)",
         pattern=re.compile(
-            r'uses:\s*[a-zA-Z0-9_\-]+/[a-zA-Z0-9_\-]+@(?:v\d+[\w.]*|latest|main|master)\b',
+            r'uses:s*[a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+@(?:vd+[w.]*|latest|main|master)',
             re.IGNORECASE,
         ),
         file_extensions=[".yml", ".yaml"],
@@ -131,7 +131,7 @@ RULES: list[Rule] = [
         severity=Severity.HIGH,
         description="Potential SQL injection via string concatenation",
         pattern=re.compile(
-            r'''(?:execute|cursor\.execute|query)\s*\(\s*["\'].*?["\']\s*\+\s*''',
+            r'''(?:execute|cursor.execute|query)s*(s*["'].*?["']s*+s*''',
             re.IGNORECASE,
         ),
         file_extensions=[".py", ".js", ".ts", ".rb", ".php"],
@@ -143,7 +143,7 @@ RULES: list[Rule] = [
         severity=Severity.HIGH,
         description="Potential SQL injection via f-string or format()",
         pattern=re.compile(
-            r'''(?:execute|cursor\.execute|query)\s*\(\s*f["\'].*?\{.*?\}''',
+            r'''(?:execute|cursor.execute|query)s*(s*f["'].*?{.*?}''',
             re.IGNORECASE,
         ),
         file_extensions=[".py"],
@@ -156,7 +156,7 @@ RULES: list[Rule] = [
         severity=Severity.MEDIUM,
         description="Insecure hash algorithm used (MD5/SHA1 for security purposes)",
         pattern=re.compile(
-            r'''(?:hashlib\.md5|hashlib\.sha1|MD5\.new|SHA\.new)\s*\(''',
+            r'''(?:hashlib.md5|hashlib.sha1|MD5.new|SHA.new)s*(''',
             re.IGNORECASE,
         ),
         file_extensions=[".py"],
@@ -172,7 +172,7 @@ RULES: list[Rule] = [
         severity=Severity.MEDIUM,
         description="Debug mode enabled in production code",
         pattern=re.compile(
-            r'''(?:DEBUG\s*=\s*True|debug\s*=\s*True|app\.debug\s*=\s*True|FLASK_DEBUG\s*=\s*1)''',
+            r'''(?:DEBUGs*=s*True|debugs*=s*True|app.debugs*=s*True|FLASK_DEBUGs*=s*1)''',
         ),
         file_extensions=[".py", ".env", ".cfg", ".ini"],
         fixable=True,
@@ -180,6 +180,19 @@ RULES: list[Rule] = [
         suppress_patterns=[
             re.compile(r"#.*test|#.*dev|#.*local", re.IGNORECASE),
         ],
+    ),
+    # ── Prompt Injection Detection ──────────────────────────────────
+    Rule(
+        rule_id="TS-005",
+        severity=Severity.HIGH,
+        description="Potential LLM Prompt Injection pattern detected",
+        pattern=re.compile(
+            r'''(?:ignores+alls+previouss+instructions|disregards+thes+above|systems+override|yous+ares+nows+a)''',
+            re.IGNORECASE,
+        ),
+        file_extensions=[".py", ".js", ".ts", ".md", ".txt"],
+        fixable=False,
+        fix_hint="Review input sanitization and prompt structure to prevent injection.",
     ),
 ]
 
