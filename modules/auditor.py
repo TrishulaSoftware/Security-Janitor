@@ -18,47 +18,73 @@ import re
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Optional, List, Dict, Union
+from typing import Optional
 
 logger = logging.getLogger("Janitor.Auditor")
 
 # ─── Data Models ─────────────────────────────────────────────────────────────
+
 
 class Severity(Enum):
     CRITICAL = "CRITICAL"
     HIGH = "HIGH"
     MEDIUM = "MEDIUM"
     LOW = "LOW"
-
-
-@dataclass
-class Rule:
-    rule_id: str
-    severity: Severity
-    description: str
-    pattern: re.Pattern
-    fix_template: Optional[str] = None
+    INFO = "INFO"
 
 
 @dataclass
 class Finding:
+    """A single vulnerability finding."""
     rule_id: str
     severity: Severity
     file_path: str
     line_number: int
-    matched_text: str
+    line_content: str
     description: str
-    fixable: bool = False
+    fixable: bool = True
+    fix_hint: Optional[str] = None
+    context_before: list[str] = field(default_factory=list)
+    context_after: list[str] = field(default_factory=list)
 
 
-# ─── Rules Definition ────────────────────────────────────────────────────────
+# ─── Detection Rules ────────────────────────────────────────────────────────
 
-RULES = [
+@dataclass
+class Rule:
+    """A detection rule definition."""
+    rule_id: str
+    severity: Severity
+    description: str
+    pattern: re.Pattern
+    file_extensions: list[str]
+    fixable: bool = True
+    fix_hint: Optional[str] = None
+    # Patterns that, if matched on the same line, suppress this rule
+    suppress_patterns: list[re.Pattern] = field(default_factory=list)
+
+
+# Phase 1 rules — pattern-based detection
+RULES: list[Rule] = [
+    # ── Hardcoded Secrets ────────────────────────────────────────────
     Rule(
         rule_id="SEC001",
         severity=Severity.CRITICAL,
-        description="Potential AWS Access Key detected",
-        pattern=re.compile(r"AKIA[0-9A-Z]{16}"),
+        description="Hardcoded API key or secret detected",
+        pattern=re.compile(
+            r'''(?:api[_-]?key|api[_-]?secret|secret[_-]?key|access[_-]?token|auth[_-]?token)'''
+            r'''\s*[=:]\s*["\'][A-Za-z0-9+/=_\-]{16,}["\']''',
+            re.IGNORECASE,
+        ),
+        file_extensions=[".py", ".js", ".ts", ".yaml", ".yml", ".json", ".env", ".cfg", ".ini", ".toml"],
+        fixable=True,
+        fix_hint="Replace hardcoded secret with environment variable reference",
+        suppress_patterns=[
+            re.compile(r"os\.environ", re.IGNORECASE),
+            re.compile(r"process\.env", re.IGNORECASE),
+            re.compile(r"#\s*noqa", re.IGNORECASE),
+            re.compile(r"example|placeholder|changeme|xxx|your[_-]", re.IGNORECASE),
+        ],
     ),
     Rule(
         rule_id="SEC002",
@@ -68,76 +94,228 @@ RULES = [
             r'''(?:password|passwd|pwd)\s*[=:]\s*["\'][^"\']{4,}["\']''',
             re.IGNORECASE,
         ),
+        file_extensions=[".py", ".js", ".ts", ".yaml", ".yml", ".json", ".cfg", ".ini", ".toml"],
+        fixable=True,
+        fix_hint="Replace hardcoded password with environment variable reference",
+        suppress_patterns=[
+            re.compile(r"os\.environ|getenv|process\.env", re.IGNORECASE),
+            re.compile(r"#\s*noqa|example|placeholder|changeme|xxx", re.IGNORECASE),
+            re.compile(r"password\s*[=:]\s*[\"'][\s]*[\"']", re.IGNORECASE),  # empty password
+        ],
     ),
     Rule(
         rule_id="SEC003",
         severity=Severity.HIGH,
-        description="Insecure hash algorithm (MD5/SHA1)",
-        pattern=re.compile(r"hashlib\.(md5|sha1)\("),
+        description="AWS-style access key detected",
+        pattern=re.compile(r'(?:AKIA|ASIA)[A-Z0-9]{16}'),
+        file_extensions=[".py", ".js", ".ts", ".yaml", ".yml", ".json", ".env", ".cfg", ".ini", ".toml", ".tf"],
+        fixable=True,
+        fix_hint="Remove AWS key and use IAM roles or environment variables",
     ),
+    # ── Mutable GitHub Action Tags ───────────────────────────────────
     Rule(
-        rule_id="SEC004",
+        rule_id="TAG001",
         severity=Severity.HIGH,
-        description="Potential SQL Injection pattern",
-        pattern=re.compile(r"execute\(f?['\"].*\{.*\}['\"]\)\s*"),
+        description="Mutable GitHub Action tag reference (vulnerable to tag-poisoning)",
+        pattern=re.compile(
+            r'uses:\s*[a-zA-Z0-9_\-]+/[a-zA-Z0-9_\-]+@(?:v\d+[\w.]*|latest|main|master)\b',
+            re.IGNORECASE,
+        ),
+        file_extensions=[".yml", ".yaml"],
+        fixable=True,
+        fix_hint="Pin to immutable 40-character commit SHA",
+    ),
+    # ── SQL Injection ────────────────────────────────────────────────
+    Rule(
+        rule_id="INJ001",
+        severity=Severity.HIGH,
+        description="Potential SQL injection via string concatenation",
+        pattern=re.compile(
+            r'''(?:execute|cursor\.execute|query)\s*\(\s*["\'].*?["\']\s*\+\s*''',
+            re.IGNORECASE,
+        ),
+        file_extensions=[".py", ".js", ".ts", ".rb", ".php"],
+        fixable=True,
+        fix_hint="Use parameterized queries instead of string concatenation",
     ),
     Rule(
-        rule_id="SEC005",
+        rule_id="INJ002",
+        severity=Severity.HIGH,
+        description="Potential SQL injection via f-string or format()",
+        pattern=re.compile(
+            r'''(?:execute|cursor\.execute|query)\s*\(\s*f["\'].*?\{.*?\}''',
+            re.IGNORECASE,
+        ),
+        file_extensions=[".py"],
+        fixable=True,
+        fix_hint="Use parameterized queries instead of f-strings in SQL",
+    ),
+    # ── Insecure Crypto ──────────────────────────────────────────────
+    Rule(
+        rule_id="CRY001",
         severity=Severity.MEDIUM,
-        description="Mutable GitHub Action tag (use SHA instead)",
-        pattern=re.compile(r"uses:\s*[\w\-/]+@v\d+"),
+        description="Insecure hash algorithm used (MD5/SHA1 for security purposes)",
+        pattern=re.compile(
+            r'''(?:hashlib\.md5|hashlib\.sha1|MD5\.new|SHA\.new)\s*\(''',
+            re.IGNORECASE,
+        ),
+        file_extensions=[".py"],
+        fixable=True,
+        fix_hint="Use hashlib.sha256() or hashlib.sha3_256() instead",
+        suppress_patterns=[
+            re.compile(r"checksum|fingerprint|cache|etag", re.IGNORECASE),
+        ],
+    ),
+    # ── Debug Flags ──────────────────────────────────────────────────
+    Rule(
+        rule_id="DBG001",
+        severity=Severity.MEDIUM,
+        description="Debug mode enabled in production code",
+        pattern=re.compile(
+            r'''(?:DEBUG\s*=\s*True|debug\s*=\s*True|app\.debug\s*=\s*True|FLASK_DEBUG\s*=\s*1)''',
+        ),
+        file_extensions=[".py", ".env", ".cfg", ".ini"],
+        fixable=True,
+        fix_hint="Set DEBUG=False or use environment variable",
+        suppress_patterns=[
+            re.compile(r"#.*test|#.*dev|#.*local", re.IGNORECASE),
+        ],
+    ),
+    # ── Prompt Injection Detection ──────────────────────────────────
+    Rule(
+        rule_id="TS-005",
+        severity=Severity.HIGH,
+        description="Potential LLM Prompt Injection pattern detected",
+        pattern=re.compile(
+            r'''(?:ignore\s+all\s+previous\s+instructions|disregard\s+the\s+above|system\s+override|you\s+are\s+now\s+a)''',
+            re.IGNORECASE,
+        ),
+        file_extensions=[".py", ".js", ".ts", ".md", ".txt"],
+        fixable=False,
+        fix_hint="Review input sanitization and prompt structure to prevent injection.",
     ),
 ]
+
+# ─── File Type Mapping ───────────────────────────────────────────────────────
+
+SCANNABLE_EXTENSIONS = set()
+for rule in RULES:
+    SCANNABLE_EXTENSIONS.update(rule.file_extensions)
 
 
 # ─── Auditor Class ───────────────────────────────────────────────────────────
 
 class Auditor:
-    def __init__(self, exclude_dirs: List[str] = None):
-        self.exclude_dirs = exclude_dirs or [".git", "__pycache__", "node_modules"]
-        self.rules = RULES
+    """
+    Scans source directories for security vulnerabilities using
+    pattern-based detection rules.
+    """
 
-    def scan_file(self, file_path: Path) -> List[Finding]:
-        """Scans a single file for all registered rules."""
-        findings = []
+    def __init__(
+        self,
+        rules: Optional[list[Rule]] = None,
+        exclude_dirs: Optional[list[str]] = None,
+    ):
+        self.rules = rules or RULES
+        self.exclude_dirs = set(exclude_dirs or [])
+        self.logger = logging.getLogger("Janitor.Auditor")
+        self._files_scanned = 0
+        self._lines_scanned = 0
+
+    def scan_directory(self, directory: Path) -> list[Finding]:
+        """Recursively scan a directory for vulnerabilities."""
+        self._files_scanned = 0
+        self._lines_scanned = 0
+        findings: list[Finding] = []
+
+        self.logger.debug("Starting scan of: %s", directory)
+
+        for filepath in self._walk_files(directory):
+            file_findings = self.scan_file(filepath)
+            findings.extend(file_findings)
+
+        self.logger.debug(
+            "Scan complete. Files: %d, Lines: %d, Findings: %d",
+            self._files_scanned, self._lines_scanned, len(findings),
+        )
+        return findings
+
+    def scan_file(self, filepath: Path) -> list[Finding]:
+        """Scan a single file against all applicable rules."""
+        findings: list[Finding] = []
+        suffix = filepath.suffix.lower()
+
+        # Filter rules to those applicable for this file type
+        applicable_rules = [
+            r for r in self.rules if suffix in r.file_extensions
+        ]
+        if not applicable_rules:
+            return findings
+
         try:
-            content = file_path.read_text(errors="ignore")
-            lines = content.splitlines()
+            lines = filepath.read_text(encoding="utf-8", errors="ignore").splitlines()
+        except OSError:
+            return findings
 
-            for line_idx, line in enumerate(lines, 1):
-                for rule in self.rules:
-                    match = rule.pattern.search(line)
-                    if match:
-                        findings.append(
-                            Finding(
-                                rule_id=rule.rule_id,
-                                severity=rule.severity,
-                                file_path=str(file_path),
-                                line_number=line_idx,
-                                matched_text=match.group(0),
-                                description=rule.description,
-                                fixable=rule.fix_template is not None,
-                            )
+        self._files_scanned += 1
+        self._lines_scanned += len(lines)
+
+        for line_num, line in enumerate(lines, start=1):
+            for rule in applicable_rules:
+                if rule.pattern.search(line):
+                    # Check suppress patterns
+                    suppressed = any(
+                        sp.search(line) for sp in rule.suppress_patterns
+                    )
+                    if suppressed:
+                        self.logger.debug(
+                            "Suppressed %s at %s:%d", rule.rule_id, filepath, line_num
                         )
-        except Exception as e:
-            logger.error(f"Error scanning {file_path}: {e}")
+                        continue
+
+                    # Gather context lines
+                    ctx_start = max(0, line_num - 3)
+                    ctx_end = min(len(lines), line_num + 2)
+
+                    finding = Finding(
+                        rule_id=rule.rule_id,
+                        severity=rule.severity,
+                        file_path=str(filepath),
+                        line_number=line_num,
+                        line_content=line.rstrip(),
+                        description=rule.description,
+                        fixable=rule.fixable,
+                        fix_hint=rule.fix_hint,
+                        context_before=lines[ctx_start:line_num - 1],
+                        context_after=lines[line_num:ctx_end],
+                    )
+                    findings.append(finding)
+
+                    self.logger.debug(
+                        "Finding: %s [%s] at %s:%d",
+                        rule.rule_id, rule.severity.value, filepath, line_num,
+                    )
 
         return findings
 
-    def scan_directory(self, root_dir: Path) -> List[Finding]:
-        """Recursively scans a directory for vulnerabilities."""
-        all_findings = []
-        for path in root_dir.rglob("*"):
-            if any(part in self.exclude_dirs for part in path.parts):
-                continue
+    def _walk_files(self, directory: Path):
+        """Yield scannable files, skipping excluded directories."""
+        try:
+            for entry in sorted(directory.iterdir()):
+                if entry.is_dir():
+                    if entry.name in self.exclude_dirs or entry.name.startswith("."):
+                        continue
+                    yield from self._walk_files(entry)
+                elif entry.is_file() and entry.suffix.lower() in SCANNABLE_EXTENSIONS:
+                    yield entry
+        except PermissionError:
+            self.logger.debug("Permission denied: %s", directory)
 
-            if path.is_file() and path.suffix in (".py", ".yml", ".yaml", ".sh"):
-                all_findings.extend(self.scan_file(path))
-
-        return all_findings
-
-if __name__ == "__main__":
-    # Self-test
-    logging.basicConfig(level=logging.INFO)
-    auditor = Auditor()
-    print(f"Auditor initialized with {len(RULES)} rules.")
+    @property
+    def stats(self) -> dict:
+        """Return scan statistics."""
+        return {
+            "files_scanned": self._files_scanned,
+            "lines_scanned": self._lines_scanned,
+            "rules_loaded": len(self.rules),
+        }

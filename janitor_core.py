@@ -23,7 +23,7 @@ import time
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Optional, List, Dict
+from typing import Optional
 
 from modules.auditor import Auditor, Finding, Severity
 from modules.git_ops import GitOperator
@@ -57,7 +57,7 @@ class JanitorConfig:
     llm_mode: Optional[str] = None      # "local", "openai", "anthropic", or None
     llm_model: Optional[str] = None
     enable_llm: bool = True
-    exclude_dirs: List[str] = field(default_factory=lambda: [
+    exclude_dirs: list[str] = field(default_factory=lambda: [
         ".git", "__pycache__", "node_modules", ".venv", "venv",
         ".tox", ".mypy_cache", ".pytest_cache", "dist", "build",
     ])
@@ -81,7 +81,7 @@ class SecurityJanitor:
         self.config = config
         self.logger = logging.getLogger("Janitor.Core")
         self.auditor = Auditor(exclude_dirs=config.exclude_dirs)
-        self.git_ops = None
+        self.git_ops: Optional[GitOperator] = None
         self._run_count = 0
         self._total_findings = 0
         self._total_patches = 0
@@ -287,7 +287,7 @@ class SecurityJanitor:
 
         self.logger.info("CYCLE %d [%s] — Complete", self._run_count, cycle_id)
 
-    def _triage(self, findings: List[Finding]) -> List[Finding]:
+    def _triage(self, findings: list[Finding]) -> list[Finding]:
         """Filter findings to only actionable items (HIGH/CRITICAL)."""
         return [
             f for f in findings
@@ -295,7 +295,7 @@ class SecurityJanitor:
             and f.fixable
         ]
 
-    def _build_commit_message(self, patches: List) -> str:
+    def _build_commit_message(self, patches: list) -> str:
         """Generate a structured commit message from patch results."""
         regex_count = sum(1 for p in patches if p.strategy != "llm_semantic_patch")
         llm_count = sum(1 for p in patches if p.strategy == "llm_semantic_patch")
