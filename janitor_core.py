@@ -30,6 +30,84 @@ from modules.git_ops import GitOperator
 from modules.llm_connector import LLMConfig, LLMConnector, LLMMode
 from modules.patcher import Patcher
 
+# ─── Veto Gate ───────────────────────────────────────────────────────────────
+
+class VetoGate:
+    """
+    Synchronous human-in-the-loop enforcement gate.
+
+    Blocks ALL outbound execution (patching, git ops, API calls) until
+    explicit Y confirmation is received from the operator.
+
+    Fail-closed: any non-Y input (including piped/non-interactive stdin)
+    results in DENY. No execution occurs without explicit human approval.
+
+    PATCH APPLIED: 2026-04-28 — Trishula Constitutional Mandate
+    """
+
+    BANNER = (
+        "\n" +
+        "═" * 70 + "\n" +
+        "  ⚡ TRISHULA VETO GATE — OPERATOR AUTHORIZATION REQUIRED\n" +
+        "═" * 70
+    )
+
+    @staticmethod
+    def _is_interactive() -> bool:
+        """Returns True only when stdin is a real TTY (not piped/CI)."""
+        import sys
+        return sys.stdin.isatty()
+
+    @classmethod
+    def prompt(cls, action: str, detail: str, severity: str = "HIGH") -> bool:
+        """
+        Present a Y/N veto prompt and block until answered.
+
+        Args:
+            action:   Short action label (e.g. "PATCH", "COMMIT", "BRANCH")
+            detail:   Human-readable description of what will execute.
+            severity: Severity of the action being gated.
+
+        Returns:
+            True  → APPROVED — execution may proceed.
+            False → DENIED   — execution is blocked.
+        """
+        import logging
+        logger = logging.getLogger("Janitor.VetoGate")
+
+        print(cls.BANNER)
+        print(f"  ACTION   : {action}")
+        print(f"  SEVERITY : {severity}")
+        print(f"  DETAIL   : {detail}")
+        print("─" * 70)
+
+        if not cls._is_interactive():
+            print("  [VETO] Non-interactive environment detected.")
+            print("  [VETO] DECISION: DENIED (fail-closed — no TTY)")
+            print("═" * 70 + "\n")
+            logger.warning(
+                "VETO GATE DENIED (non-interactive): %s — %s", action, detail
+            )
+            return False
+
+        try:
+            response = input("  Authorize this action? [Y/N] > ").strip().upper()
+        except (EOFError, KeyboardInterrupt):
+            response = "N"
+
+        approved = response == "Y"
+        verdict = "APPROVED" if approved else "DENIED"
+        icon = "✅" if approved else "🚫"
+
+        print(f"  {icon} VETO GATE DECISION: {verdict}")
+        print("═" * 70 + "\n")
+
+        logger.info(
+            "VETO GATE %s: %s — %s", verdict, action, detail
+        )
+        return approved
+
+
 # ─── Configuration ───────────────────────────────────────────────────────────
 
 LOG_FORMAT = (
@@ -230,6 +308,21 @@ class SecurityJanitor:
             self.logger.info("[DRY RUN] Stopping before patch phase.")
             return
 
+        # ── VETO GATE: Phase 3 Authorization ─────────────────────────────
+        finding_summary = ", ".join(
+            f"{f.rule_id}@{f.file_path}:{f.line_number}" for f in actionable
+        )
+        gate_approved = VetoGate.prompt(
+            action="PATCH",
+            detail=f"{len(actionable)} finding(s) will be mutated: {finding_summary[:120]}",
+            severity="HIGH",
+        )
+        if not gate_approved:
+            self.logger.warning(
+                "[VETO GATE] PATCH PHASE BLOCKED by operator. Cycle aborted."
+            )
+            return
+
         # Phase 3: PATCH (Dual-Tier)
         self.logger.info("[Phase 3/4] PATCH — Generating fixes (Tier 1: Regex → Tier 2: LLM)...")
         patch_results = []
@@ -261,32 +354,47 @@ class SecurityJanitor:
 
         # Phase 4: COMMIT
         if self.git_ops and self.config.auto_commit:
-            self.logger.info("[Phase 4/4] COMMIT — Branching and committing fixes...")
+            # ── VETO GATE: Phase 4 Authorization ─────────────────────────
+            patch_summary = ", ".join(
+                f"{r.finding.rule_id}" for r in successful_patches
+            )
+            commit_approved = VetoGate.prompt(
+                action="COMMIT",
+                detail=f"{len(successful_patches)} patch(es) will be staged and committed: {patch_summary}",
+                severity="HIGH",
+            )
+            if not commit_approved:
+                self.logger.warning(
+                    "[VETO GATE] COMMIT PHASE BLOCKED by operator. Patches applied to disk but NOT committed."
+                )
+            else:
+                self.logger.info("[Phase 4/4] COMMIT — Branching and committing fixes...")
             branch_name = f"{self.config.branch_prefix}-{cycle_id}"
 
-            try:
-                self.git_ops.create_branch(branch_name)
-                self.logger.info("  Branch created: %s", branch_name)
-
-                patched_files = [
-                    r.finding.file_path for r in successful_patches
-                ]
-                self.git_ops.stage_files(patched_files)
-
-                commit_msg = self._build_commit_message(successful_patches)
-                commit_sha = self.git_ops.commit(commit_msg)
-                self._total_commits += 1
-                self.logger.info("  Committed: %s (%s)", commit_sha[:12], branch_name)
-
-                self.git_ops.checkout_original()
-                self.logger.info("  Returned to original branch.")
-
-            except Exception as e:
-                self.logger.error("  Git operation failed: %s", e)
+            if commit_approved:
                 try:
-                    self.git_ops.abort()
-                except Exception:
-                    pass
+                    self.git_ops.create_branch(branch_name)
+                    self.logger.info("  Branch created: %s", branch_name)
+
+                    patched_files = [
+                        r.finding.file_path for r in successful_patches
+                    ]
+                    self.git_ops.stage_files(patched_files)
+
+                    commit_msg = self._build_commit_message(successful_patches)
+                    commit_sha = self.git_ops.commit(commit_msg)
+                    self._total_commits += 1
+                    self.logger.info("  Committed: %s (%s)", commit_sha[:12], branch_name)
+
+                    self.git_ops.checkout_original()
+                    self.logger.info("  Returned to original branch.")
+
+                except Exception as e:
+                    self.logger.error("  Git operation failed: %s", e)
+                    try:
+                        self.git_ops.abort()
+                    except Exception:
+                        pass
         else:
             self.logger.info("[Phase 4/4] COMMIT — Skipped (git disabled or auto-commit off).")
 
